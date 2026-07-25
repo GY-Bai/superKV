@@ -11,7 +11,8 @@ Pluggable vLLM V1 integration.
 |-----------|--------|--------|
 | **DeltaKV** | INT8 delta (K+V), batch, max_tokens, NaN guards | ✅ V4 |
 | **TurboQuant** | Rotation + Lloyd-Max, hybrid INT8 on wide K ranges | ✅ V2 |
-| **Eviction** | Uniform / Similarity / Keyframe token pruning | ✅ v0.1 |
+| **Eviction** | Uniform / Similarity / Keyframe pruning | ✅ v0.1 |
+| **ChunkKV** | Semantic chunk scoring + top-K selection (K-vector proxy) | ✅ v0.1 |
 | **RocketKV** | Two-stage hybrid eviction | 📋 planned |
 | **KV-Compress** | Paged variable-rate compression | 📋 planned |
 

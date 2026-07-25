@@ -279,3 +279,53 @@ class TestBatchSupport:
         from superkv.algorithms.deltakv import DeltaKVCompressor
         c = DeltaKVCompressor(num_heads=4, head_dim=64)
         assert c.version == "4.0"
+
+
+class TestChunkKV:
+    def test_create(self):
+        from superkv.algorithms.chunkkv import ChunkKVTracker
+        t = ChunkKVTracker(chunk_size=4, top_k=2)
+        assert t.chunk_size == 4
+        assert t.top_k == 2
+
+    def test_warmup_keeps_everything(self):
+        from superkv.algorithms.chunkkv import ChunkKVTracker
+        t = ChunkKVTracker(chunk_size=4, top_k=2)
+        K = torch.randn(8, 64)
+        # First 16 tokens (8 chunks): warmup, keep all
+        for i in range(16):
+            assert t.should_keep(i, K) is True
+
+    def test_pruning_after_warmup(self):
+        from superkv.algorithms.chunkkv import ChunkKVTracker
+        t = ChunkKVTracker(chunk_size=4, top_k=2)
+        K_const = torch.randn(8, 64)
+        # Feed 40 tokens (10 chunks) with varying K to create score differences
+        for i in range(40):
+            K_varying = K_const + torch.randn(8, 64) * (i % 5)
+            t.should_keep(i, K_varying)
+        # After warmup + pruning, some chunks should be evicted
+        keeps = [t.should_keep(i, K_const) for i in range(40)]
+        kept_count = sum(keeps)
+        # Should keep roughly chunk_size * top_k tokens
+        assert kept_count <= 40  # at most everything
+        assert kept_count >= 8   # at least two chunks
+
+    def test_layer_reuse(self):
+        from superkv.algorithms.chunkkv import ChunkKVTracker
+        t = ChunkKVTracker(chunk_size=4, top_k=2)
+        K = torch.randn(8, 64)
+        # Feed layer 0
+        for i in range(20):
+            t.should_keep(i, K, layer_idx=0)
+        # Layer 5 should use cached indices without re-scoring
+        keeps_l5 = [t.should_keep(i, K, layer_idx=5) for i in range(20)]
+        assert sum(keeps_l5) <= 20
+
+    def test_reset(self):
+        from superkv.algorithms.chunkkv import ChunkKVTracker
+        t = ChunkKVTracker(chunk_size=4, top_k=2)
+        for i in range(20):
+            t.should_keep(i, torch.randn(8, 64))
+        t.reset()
+        assert len(t._chunk_scores) == 0
