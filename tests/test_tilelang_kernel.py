@@ -58,7 +58,8 @@ class TestQ4_0KernelVsPyTorch:
     @requires_tilelang
     def test_quantize_vs_fallback(self):
         from superkv.kernels.tilelang import q4_0_quantize
-        from superkv.kernels.tilelang import _pytorch_fallback_quantize
+        from superkv.kernels.tilelang.q4_0_kernel import \
+            _pytorch_fallback_quantize
         x = torch.randn(3, 64)
         qt, dt = q4_0_quantize(x)
         qp, dp = _pytorch_fallback_quantize(x)
@@ -70,7 +71,8 @@ class TestQ4_0KernelVsPyTorch:
     @requires_tilelang
     def test_dequant_vs_fallback(self):
         from superkv.kernels.tilelang import q4_0_quantize, q4_0_dequantize
-        from superkv.kernels.tilelang import _pytorch_fallback_dequantize
+        from superkv.kernels.tilelang.q4_0_kernel import \
+            _pytorch_fallback_dequantize
         x = torch.randn(3, 64)
         q, d = q4_0_quantize(x)
         xt = q4_0_dequantize(q, d, x.shape)
