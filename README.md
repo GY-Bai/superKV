@@ -1,122 +1,128 @@
 # superKV
 
-**Multi-algorithm KV cache compression toolkit.**
+> Multi-algorithm KV cache compression toolkit.
+> 多算法 KV 缓存压缩工具包。
 
-> 一行代码压缩 KV cache，4-6x 内存节省，89 tests 验证。
-> 跨平台（CUDA / CPU / Metal / Ascend）| vLLM 插件 | 自适应策略
+**One line to 4-6x memory savings. | 一行代码，4-6 倍内存节省。**
 
-## 快速上手
+89 tests verified · 跨平台（CUDA/CPU/Metal/Ascend） · vLLM plugin · 自适应策略
+
+---
+
+## Quick Start · 快速上手
 
 ```bash
-pip install superkv  # 或: git clone + uv sync
+pip install superkv  # or: git clone + uv sync
 ```
 
 ```python
 from superkv import create_compressor
 
+# Adaptive mode — auto-selects best strategy, zero config
 # 自适应模式 — 自动选最优策略，零配置
 c = create_compressor("adaptive", num_heads=8, head_dim=128, num_layers=36)
 
-# 压缩（和普通 dict 一样简单）
-kf = torch.randn(8, 128)  # 你的模型 K, V 就长这样
+# Compress (as easy as a dict) · 压缩和字典一样简单
+kf = torch.randn(8, 128)
 vf = torch.randn(8, 128)
-c.compress(kf, vf, layer_idx=0, token_id=0)  # token 0: 关键帧
-packed = c.compress(kf + 0.1, vf + 0.1, layer_idx=0, token_id=1)  # 压缩！
-k_hat, v_hat = c.decompress(packed, layer_idx=0)  # 解压
+c.compress(kf, vf, layer_idx=0, token_id=0)          # token 0: keyframe 关键帧
+packed = c.compress(kf + 0.1, vf + 0.1, layer_idx=0, token_id=1)  # compressed 压缩
+k_hat, v_hat = c.decompress(packed, layer_idx=0)      # decompress 解压
 
 print(c.memory_report())
 # {'algorithm': 'adaptive', 'compression_ratio': 4.5, ...}
 ```
 
-## 原理（30 秒版）
+## How it works · 原理（30 秒）
 
-KV cache 是 LLM 推理的内存大户。superKV 用三种互补手段压缩：
+KV cache is the memory bottleneck for LLM inference. superKV attacks it from three angles:
+KV cache 是 LLM 推理的内存瓶颈，superKV 从三个方向压缩：
 
 ```
 ┌─────────────┐    ┌──────────────┐    ┌──────────────┐
-│  量化       │    │  残差编码     │    │  分块淘汰     │
-│  每个值压小  │ +  │  只存差值     │ +  │  不重要不要   │
-│  2-6x       │    │  额外 2-4x   │    │  额外 2-10x  │
+│ Quantization│    │   Residual   │    │   Eviction   │
+│ 量化        │ +  │   残差编码    │ +  │   分块淘汰    │
+│ 2-6x        │    │  extra 2-4x  │    │  extra 2-10x │
 └─────────────┘    └──────────────┘    └──────────────┘
        ↓                  ↓                   ↓
-          TurboQuant        DeltaKV            ChunkKV
-          自适应组合: AdaptiveCompressor
+   TurboQuant          DeltaKV            ChunkKV
+        AdaptiveCompressor (auto-select)
 ```
 
-## 内置算法
+## Algorithms · 内置算法
 
-| 算法 | 一句话 | 压缩率 | 精度 | 适用场景 |
-|------|--------|--------|------|----------|
-| **adaptive** 🔥 | 自动选最优 | 4-6x | MSE<0.01 | 推荐首选 |
-| **deltakv** | INT8 残差 | 4.5x | MSE<0.01 | K 值范围大 |
-| **turboquant** | 旋转+混合量化 | 6x | MSE<0.1 | K 值范围小 |
-| **chunkkv** | 语义分块淘汰 | 2-10x | — | 长上下文 |
-| **eviction** | 均匀/相似度驱逐 | 2-8x | — | 快速原型 |
+| Algorithm 算法 | Description 描述 | Compression 压缩 | Accuracy 精度 | Use when 适用 |
+|------|------|------|------|------|
+| **adaptive** 🔥 | Auto-select best 自动选最优 | 4-6x | MSE<0.01 | Recommended 推荐 |
+| **deltakv** | INT8 residual 残差编码 | 4.5x | MSE<0.01 | Wide K range K 值域大 |
+| **turboquant** | Rotation + Lloyd-Max 旋转量化 | 6x | MSE<0.1 | Small K range K 值域小 |
+| **chunkkv** | Semantic chunk eviction 语义分块 | 2-10x | — | Long context 长上下文 |
+| **eviction** | Uniform/similarity pruning 均匀驱逐 | 2-8x | — | Quick prototype 快速原型 |
 
-> 94 tests 通过 — M2 Mac + RTX 3090 双平台验证
+> 94 tests passed — M2 Mac + RTX 3090 verified
 
-## 手动选择算法
+## Manual Selection · 手动选择
 
 ```python
-# DeltaKV: 适合 K 值范围大的模型（如 Qwen3-8B 浅层 K∈[-204,218]）
+# DeltaKV: for models with large K range (e.g. Qwen3-8B L0 K∈[-204,218])
+# DeltaKV: 适合 K 值域大的模型
 c = create_compressor("deltakv", num_heads=8, head_dim=128, reference_stride=8)
 
-# TurboQuant: 适合 V 值小、压缩优先的场景
+# TurboQuant: for small V values, compression-first
+# TurboQuant: V 值小、压缩优先
 c = create_compressor("turboquant", num_heads=8, head_dim=128, bits_k=3, bits_v=2)
 
-# ChunkKV: 长上下文叠加驱逐
+# ChunkKV: long-context eviction overlay · 长上下文叠加驱逐
 from superkv.algorithms.chunkkv import ChunkKVTracker
-tracker = ChunkKVTracker(chunk_size=8, top_k=4, adaptive=True)  # 弹性分块
+tracker = ChunkKVTracker(chunk_size=8, top_k=4, adaptive=True)  # elastic 弹性
 tracker.should_keep(token_id, K)  # → True/False
 ```
 
-## vLLM 插件
+## vLLM Plugin · vLLM 插件
 
 ```python
 from superkv.vllm_plugin import VLLMModelHook
 
 hook = VLLMModelHook(algorithm="adaptive")
-hook.install(model)  # 自动拦截 attention 层
-# 模型现在自动压缩 KV cache
+hook.install(model)  # auto-hooks attention layers · 自动拦截
 print(hook.report())
 ```
 
-## GPU 实测（RTX 3090, Qwen3-8B）
+## GPU Benchmarks · GPU 实测
 
-```
-模型: Qwen3-8B, 16.4GB VRAM, 36 layers, 8KV×128dim
+RTX 3090, Qwen3-8B (16.4GB VRAM, 36 layers, 8KV×128dim)
 
-Layer  K 范围       DeltaKV        TurboQuant+Adaptive
-  0    [-204,218]   4.5x MSE=0.006  6.1x MSE=0.095
- 12    [-19,21]     4.5x MSE=0.001  6.1x MSE=0.001
- 35    [-29,25]     4.5x MSE=0.002  6.1x MSE=0.001
-```
+| Layer 层 | K Range 范围 | DeltaKV | TurboQuant+Adaptive |
+|------|------|------|------|
+| 0 | [-204, 218] | 4.5x MSE=0.006 | 6.1x MSE=0.095 |
+| 12 | [-19, 21] | 4.5x MSE=0.001 | 6.1x MSE=0.001 |
+| 35 | [-29, 25] | 4.5x MSE=0.002 | 6.1x MSE=0.001 |
 
-## 架构
+## Architecture · 架构
 
 ```
 superkv/
-├── engine/            # 注册表 + 平台检测 + NaN 守护
-├── algorithms/        # 算法插件
-│   ├── deltakv/       # INT8 残差 + Q4_0
-│   ├── turboquant/    # 旋转 + Lloyd-Max 量化
-│   ├── chunkkv.py     # 语义分块淘汰
-│   ├── adaptive.py    # 自动路由
-│   ├── eviction.py    # 均匀/相似度驱逐
-│   └── transforms.py  # 预处理工具
-├── kernels/tilelang/  # 跨平台 GPU kernel
-├── tools/             # benchmark
-└── vllm_plugin/       # vLLM 集成
+├── engine/            # Registry 注册表 + platform 平台 + NaN guard 守护
+├── algorithms/        # Algorithm plugins 算法插件
+│   ├── deltakv/       # INT8 residual + Q4_0
+│   ├── turboquant/    # Rotation + Lloyd-Max
+│   ├── chunkkv.py     # Semantic chunk eviction
+│   ├── adaptive.py    # Auto-router 自动路由
+│   ├── eviction.py    # Uniform/similarity pruning
+│   └── transforms.py  # Pre-processing utilities
+├── kernels/tilelang/  # Cross-platform GPU kernels
+├── tools/             # Benchmark
+└── vllm_plugin/       # vLLM integration
 ```
 
-## 平台
+## Platform Support · 平台支持
 
-| 平台 | tilelang | PyTorch |
-|------|----------|---------|
+| Platform | tilelang | PyTorch fallback |
+|----------|----------|------------------|
 | NVIDIA | ✅ | ✅ |
-| Metal (M2) | 🔜 | ✅ |
-| Ascend | 🔜 | ✅ |
-| CPU | ✅ | ✅ |
+| Apple Metal | 🔜 | ✅ |
+| Ascend NPU | 🔜 | ✅ |
+| x86/ARM CPU | ✅ | ✅ |
 
 ## License
 
