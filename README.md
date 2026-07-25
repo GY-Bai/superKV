@@ -10,7 +10,7 @@ Pluggable vLLM V1 integration.
 | Algorithm | Method | Status |
 |-----------|--------|--------|
 | **DeltaKV** | Residual encoding + Q4_0 quantization + sparse attention | ✅ v0.1 |
-| **TurboQuant** | Random Hadamard rotation + optimal scalar quantization | 🔜 v0.2 |
+| **TurboQuant** | Random rotation + Lloyd-Max optimal quantization (K3/V2) | ✅ v0.1 |
 | **RocketKV** | Two-stage hybrid eviction | 📋 planned |
 | **KV-Compress** | Paged variable-rate compression | 📋 planned |
 

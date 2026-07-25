@@ -1,18 +1,29 @@
 """TurboQuant: Random rotation + optimal scalar quantization.
 
-Google ICLR 2026. TurboQuant compresses KV caches using:
-  1. Random orthogonal rotation (Hadamard transform)
-  2. Optimal scalar quantization per group with learned scales
+Google ICLR 2026. Compresses KV cache using:
+  1. Random orthogonal rotation (QR decomposition)
+  2. Lloyd-Max optimal quantization codebook
+  3. Asymmetric bit-widths (K=3bit, V=2bit by default)
 
-Status: PLACEHOLDER — to be implemented.
-Reference: https://github.com/vllm-project/vllm/pull/38479
+Reference: arXiv:2504.19874, vLLM PR #38479
 """
 
+from superkv.algorithms.turboquant.core import (
+    generate_rotation_matrix,
+    turboquant_quantize,
+    turboquant_dequantize,
+    turboquant_roundtrip_mse,
+    get_codebook,
+    _lloyd_max_codebook,
+)
+from superkv.algorithms.turboquant.compressor import TurboQuantCompressor
 
-@staticmethod
-def _placeholder():
-    raise NotImplementedError(
-        "TurboQuant integration coming in superKV v0.2. "
-        "Requires: random Hadamard rotation + asymmetric K/V quantization "
-        "kernel. See vLLM PR #38479 for reference implementation."
-    )
+__all__ = [
+    "generate_rotation_matrix",
+    "turboquant_quantize",
+    "turboquant_dequantize",
+    "turboquant_roundtrip_mse",
+    "get_codebook",
+    "_lloyd_max_codebook",
+    "TurboQuantCompressor",
+]
