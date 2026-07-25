@@ -128,19 +128,27 @@ class ChunkKVTracker(EvictionTracker):
         if K is None:
             return
 
-        # Elastic split check: K突变 → 提前结束当前 chunk
-        should_close = (token_id % self.chunk_size == self.chunk_size - 1)
-        if self.adaptive and len(self._chunk_buffer) >= self._min_chunk_size:
-            # Compute chunk mean so far
-            buf_k = torch.stack(self._chunk_buffer + [K])
-            current_mean = buf_k.mean(dim=(0, 1))
-            # Check similarity with last committed chunk
-            if self._prev_chunk_mean is not None:
-                sim = F.cosine_similarity(
-                    current_mean.flatten(),
-                    self._prev_chunk_mean.flatten(), dim=0)
-                if sim < self.split_threshold:
-                    should_close = True  # K突然变了 → 切分
+        # Elastic split check: K突变 → 结束当前 chunk
+        # 固定模式: chunk_size 一到就切
+        # 弹性模式: 只有 K 突变或超过安全上限才切
+        should_close = False
+        if self.adaptive:
+            # Elastic: split on mutation or safety cap
+            if len(self._chunk_buffer) >= self._min_chunk_size:
+                buf_k = torch.stack(self._chunk_buffer + [K])
+                current_mean = buf_k.mean(dim=(0, 1))
+                if self._prev_chunk_mean is not None:
+                    sim = F.cosine_similarity(
+                        current_mean.flatten(),
+                        self._prev_chunk_mean.flatten(), dim=0)
+                    if sim < self.split_threshold:
+                        should_close = True  # K突然变了 → 切分
+            # Safety cap: don't let a single chunk dominate
+            if len(self._chunk_buffer) >= self.chunk_size * 8:
+                should_close = True
+        else:
+            # Fixed: chunk_size tokens → close
+            should_close = (token_id % self.chunk_size == self.chunk_size - 1)
 
         if should_close and len(self._chunk_buffer) > 0:
             self._chunk_buffer.append(K)
