@@ -39,27 +39,34 @@ class ChunkKVTracker(EvictionTracker):
     """
 
     def __init__(self, chunk_size: int = 8, top_k: int = 4,
-                 layer_reuse: bool = True):
+                 layer_reuse: bool = True,
+                 adaptive: bool = False,
+                 split_threshold: float = 0.95):
         """
         Args:
-            chunk_size: tokens per chunk
+            chunk_size: base chunk size (max when adaptive=True)
             top_k: number of chunks to keep (after initial buffer)
-            layer_reuse: if True, only layer 0 computes scores;
-                         other layers reuse layer 0's indices
+            layer_reuse: if True, only layer 0 computes scores
+            adaptive: if True, split chunks at K-vector mutation points
+            split_threshold: cosine similarity below which we split
+                             (lower = more aggressive splitting)
         """
         assert chunk_size >= 1 and top_k >= 1
         self.chunk_size = chunk_size
         self.top_k = top_k
         self.layer_reuse = layer_reuse
+        self.adaptive = adaptive
+        self.split_threshold = split_threshold
 
         # State
-        self._chunk_buffer: list[torch.Tensor] = []  # accumulating K tensors
-        self._chunk_scores: OrderedDict[int, float] = {}  # chunk_id → score
+        self._chunk_buffer: list[torch.Tensor] = []
+        self._chunk_scores: OrderedDict[int, float] = {}
         self._kept_chunks: set[int] = set()
         self._prev_chunk_mean: torch.Tensor | None = None
         self._next_chunk_id = 0
         self._scored_layers: set[int] = set()
-        self._layer_indices: dict[int, set[int]] = {}  # layer → kept chunk ids
+        self._layer_indices: dict[int, set[int]] = {}
+        self._min_chunk_size = max(2, chunk_size // 4)  # floor for elastic
 
     # ── EvictionTracker interface ─────────────────────────────────
 
@@ -112,21 +119,34 @@ class ChunkKVTracker(EvictionTracker):
     def _ensure_chunk_scored(self, token_id: int,
                               K: torch.Tensor | None,
                               layer_idx: int):
-        """Score the chunk containing token_id when its last token arrives."""
+        """Score the chunk. With adaptive=True, may split early."""
         chunk_id = token_id // self.chunk_size
 
-        # Already scored this chunk on this layer
         if layer_idx in self._scored_layers and chunk_id in self._chunk_scores:
             return
 
-        # Accumulate K
-        if K is not None and token_id % self.chunk_size == self.chunk_size - 1:
-            # Last token of chunk → flush and score
+        if K is None:
+            return
+
+        # Elastic split check: K突变 → 提前结束当前 chunk
+        should_close = (token_id % self.chunk_size == self.chunk_size - 1)
+        if self.adaptive and len(self._chunk_buffer) >= self._min_chunk_size:
+            # Compute chunk mean so far
+            buf_k = torch.stack(self._chunk_buffer + [K])
+            current_mean = buf_k.mean(dim=(0, 1))
+            # Check similarity with last committed chunk
+            if self._prev_chunk_mean is not None:
+                sim = F.cosine_similarity(
+                    current_mean.flatten(),
+                    self._prev_chunk_mean.flatten(), dim=0)
+                if sim < self.split_threshold:
+                    should_close = True  # K突然变了 → 切分
+
+        if should_close and len(self._chunk_buffer) > 0:
             self._chunk_buffer.append(K)
-            chunk_k = torch.stack(self._chunk_buffer)  # (chunk_size, n_heads, dim)
+            chunk_k = torch.stack(self._chunk_buffer)
             self._chunk_buffer.clear()
             self._score_chunk(chunk_id, chunk_k, layer_idx)
-
         elif K is not None:
             self._chunk_buffer.append(K)
 
