@@ -9,10 +9,13 @@ Pluggable vLLM V1 integration.
 
 | Algorithm | Method | Status |
 |-----------|--------|--------|
-| **DeltaKV** | Residual encoding + Q4_0 quantization + sparse attention | ✅ v0.1 |
+| **DeltaKV** | Residual encoding + INT8 delta (K+V), q4_0 (legacy) | ✅ v0.1 |
 | **TurboQuant** | Random rotation + Lloyd-Max optimal quantization (K3/V2) | ✅ v0.1 |
+| **Eviction** | Uniform / Similarity / Keyframe token pruning | ✅ v0.1 |
 | **RocketKV** | Two-stage hybrid eviction | 📋 planned |
 | **KV-Compress** | Paged variable-rate compression | 📋 planned |
+
+> 82 tests passing on M2 (CPU) + RTX 3090 (GPU)
 
 ## vLLM Plugin (Gate 8)
 
@@ -32,13 +35,13 @@ print(hook.report())  # {"compression_ratio": 4.2, ...}
 from superkv import create_compressor, list_algorithms
 
 # See what's available
-print(list_algorithms())  # ['deltakv']
+print(list_algorithms())  # ['deltakv', 'turboquant']
 
-# Create a compressor
+# Create a compressor (DeltaKV V3: INT8 delta for K+V)
 c = create_compressor("deltakv", num_heads=8, head_dim=128,
-                      reference_stride=8, normalized=True)
+                      reference_stride=8)
 
-# Compress KV cache
+# Compress KV cache (DeltaKV V3: K→INT8 delta, V→INT8 delta)
 kf_k = torch.randn(8, 128)
 kf_v = torch.randn(8, 128)
 c.compress(kf_k, kf_v, layer_idx=0, token_id=0)  # keyframe
@@ -61,16 +64,28 @@ import superkv.vllm_plugin  # registers DeltaKVSpec
 # Then launch vLLM with superKV algorithms
 ```
 
+## Benchmark
+
+```bash
+uv run python -m superkv.tools.benchmark
+```
+
+Compares all algorithms on synthetic workloads: compression ratio, MSE, throughput.
+
 ## Architecture
 
 ```
 superkv/
-├── engine/        # Registry + platform detection
-├── algorithms/    # Each algorithm = one subpackage
-│   ├── deltakv/   # Residual + Q4_0 + sparse
-│   └── turboquant/# Random rotation + scalar quant
-├── kernels/       # tilelang-accelerated kernels
-└── vllm_plugin/   # vLLM V1 KVCacheSpec registration
+├── engine/           # Registry + platform detection
+├── algorithms/       # Each algorithm = one subpackage
+│   ├── deltakv/      # INT8 delta + Q4_0 + sparse attention
+│   ├── turboquant/   # Random rotation + Lloyd-Max quant
+│   ├── eviction.py   # Token pruning strategies
+│   └── transforms.py # log/tanh/clip pre-processing
+├── kernels/          # tilelang-accelerated kernels
+│   └── tilelang/     # Q4_0 + attention (CPU c + CUDA targets)
+├── tools/            # Benchmark & diagnostics
+└── vllm_plugin/      # vLLM V1 hook + attention type detection
 ```
 
 ## Platform Support
@@ -83,6 +98,15 @@ superkv/
 | x86/ARM CPU | ✅ c | ✅ |
 
 ## GPU Smoke Tests (RTX 3090, 24GB)
+
+### Key Finding: K Value Range Is the Bottleneck
+
+Real model K values span dramatically different ranges across layers:
+- Shallow layers (Qwen3-8B L0): K ∈ [-204, 218] — need INT8 delta
+- MoE models (OLMoE L0): K ∈ [-17, 19] — Q4_0 would suffice
+- Deep layers have large V deltas — INT8 delta handles both uniformly
+
+This led to DeltaKV V3 using INT8 delta for both K and V across all layers.
 
 ### Real Model Validation
 
