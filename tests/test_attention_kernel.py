@@ -55,14 +55,16 @@ class TestSparseAttentionCompile:
 
     @requires_tilelang
     def test_precompiled(self):
-        """Pre-compiled kernel should work on current platform."""
+        """Pre-compiled kernel works on CPU, skips on GPU."""
         from superkv.kernels.tilelang._precompiled import (
             get_precompiled_attention, has_precompiled)
+        from superkv.engine.platform import detect_platform
         if not has_precompiled():
+            if detect_platform() != 'cpu':
+                pytest.skip("precompiled kernel is CPU-only")
             pytest.skip("tilelang not available")
         kernel = get_precompiled_attention()
-        if kernel is None:
-            pytest.skip("precompiled kernel not available on this platform")
+        assert kernel is not None
         Q = torch.randn(4, 32)
         K = torch.randn(8, 4, 32)
         scores = torch.zeros(4, 8, dtype=torch.float32)
