@@ -140,3 +140,4 @@ class TurboQuantCompressor:
         self._compressed.clear()
         self._Pi_k.clear(); self._Pi_v.clear()
         self._total_original = 0; self._total_compressed = 0
+# Legacy imports retained for backward compat

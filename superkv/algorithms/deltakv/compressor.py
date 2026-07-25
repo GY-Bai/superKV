@@ -16,6 +16,7 @@ from superkv.algorithms.deltakv.core import (
     is_keyframe,
     Q4_0_BLOCK_SIZE,
 )
+from superkv.engine.guards import check_kv
 
 
 @register_algorithm
@@ -61,7 +62,9 @@ class DeltaKVCompressor:
             K: (n_heads, head_dim) or (batch, n_heads, head_dim)
             V: same shape as K
         """
-        # Detect batch mode
+        K, V = check_kv(K, V, expected_heads=self.num_heads,
+                        expected_dim=self.head_dim)
+
         if K.dim() == 3:
             return self._compress_batch(K, V, layer_idx, token_id)
         return self._compress_single(K, V, layer_idx, token_id)
