@@ -193,3 +193,40 @@ class TestTurboQuantCompressor:
         packed = c.compress(torch.randn(8, 128), torch.randn(8, 128),
                             layer_idx=0)
         assert packed is not None
+
+
+class TestTurboQuantHybridK:
+    def test_large_k_switches_to_int8(self):
+        """K with wide range should use INT8 mode automatically."""
+        from superkv.engine.registry import create_compressor
+        c = create_compressor("turboquant", num_heads=8, head_dim=128, k_auto_scale=True)
+        K = torch.randn(8, 128) * 100  # max ~300, triggers INT8 path
+        V = torch.randn(8, 128) * 0.5
+        packed = c.compress(K, V, layer_idx=0)
+        Kr, Vr = c.decompress(packed, layer_idx=0)
+        mse_k = torch.nn.functional.mse_loss(Kr, K).item()
+        assert mse_k < 10, f"K MSE {mse_k:.2f} — INT8 should handle wide range"
+        assert packed[0] == 'int8', f"Expected int8 mode, got {packed[0]}"
+
+    def test_small_k_stays_turboquant(self):
+        """Small K values should stay in TurboQuant mode."""
+        from superkv.engine.registry import create_compressor
+        c = create_compressor("turboquant", num_heads=8, head_dim=128, k_auto_scale=True)
+        K = torch.randn(8, 128) * 3
+        V = torch.randn(8, 128)
+        packed = c.compress(K, V, layer_idx=0)
+        assert packed[0] == 'tq', f"Expected tq mode, got {packed[0]}"
+
+    def test_version(self):
+        from superkv.engine.registry import create_compressor
+        c = create_compressor("turboquant", num_heads=8, head_dim=128)
+        assert c.version == "0.2"
+
+    def test_disable_auto_scale(self):
+        """k_auto_scale=False should always use TurboQuant path."""
+        from superkv.engine.registry import create_compressor
+        c = create_compressor("turboquant", num_heads=8, head_dim=128, k_auto_scale=False)
+        K = torch.randn(8, 128) * 100
+        V = torch.randn(8, 128)
+        packed = c.compress(K, V, layer_idx=0)
+        assert packed[0] == 'tq', "Should stay tq when auto_scale disabled"
