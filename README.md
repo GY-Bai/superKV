@@ -82,6 +82,39 @@ superkv/
 | Ascend NPU | 🔜 via tilelang | ✅ |
 | x86/ARM CPU | ✅ c | ✅ |
 
+## GPU Smoke Tests (RTX 3090, 24GB)
+
+### Real Model Validation
+
+| Model | Type | Attention | VRAM | DeltaKV V3 | K Range |
+|-------|------|-----------|------|------------|---------|
+| **Qwen3-8B** | Dense 8B | traditional ✅ | 16.4GB | 2.6x, MSE<0.006 | [-204, 218] |
+| **OLMoE-1B-7B** | MoE 7B | traditional ✅ | 13.8GB | 2.7x, MSE<0.001 | [-17, 19] |
+
+### Algorithm Comparison (Qwen3-8B, Layer 0)
+
+| Algorithm | Compression | K MSE | V MSE | Notes |
+|-----------|------------|-------|-------|-------|
+| **DeltaKV V3** (INT8 delta) | 2.6x | 0.005 | 0.000 | Best accuracy on wide K ranges |
+| **TurboQuant** (K3V2) | 9.8x | 11.0 | 0.000 | K explodes on [-204,218]; OK on smaller ranges |
+
+### tilelang CUDA Kernel Performance
+
+| Kernel | Input Shape | Time/iter | vs PyTorch |
+|--------|------------|-----------|------------|
+| Q4_0 quant+dequant | 1024×128 | 2.7ms | — |
+| Attention scores | 8×128 × 256 tok | 0.2ms | cuBLAS |
+| Attention (precompiled 4×32×8) | 4×32 × 8 tok | ~5µs | matches einsum |
+
+### Attention Type Detection
+
+| Model Type | Detection | Action |
+|-----------|-----------|--------|
+| Traditional (Qwen3-8B, OLMoE) | `traditional` | Hook and compress ✅ |
+| Linear (GatedDeltaNet, Qwen3.5) | `linear` | Skip — no K,V to compress ✅ |
+| MLA (DeepSeek) | `mla` | Skip — already compressed ✅ |
+| Mamba/SSM | `mamba` | Skip — state space ✅ |
+
 ## License
 
 MIT
