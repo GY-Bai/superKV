@@ -18,6 +18,7 @@ from superkv.algorithms.deltakv.core import (
     is_keyframe,
     Q4_0_BLOCK_SIZE,
 )
+from superkv.algorithms.transforms import apply_log_transform, apply_log_inverse
 
 
 @register_algorithm
@@ -36,6 +37,7 @@ class DeltaKVCompressor:
                  reference_stride: int = 8,
                  num_layers: int = 1,
                  normalized: bool = True,
+                 k_transform: str | None = 'log',
                  max_sparse_tokens: int = 256):
         """
         Args:
@@ -44,6 +46,8 @@ class DeltaKVCompressor:
             reference_stride: keyframe interval (stride=1 = no compression)
             num_layers: number of transformer layers
             normalized: use per-head normalized Q4_0 (recommended for real models)
+            k_transform: pre-processing for K ('log', None).
+                         'log' compresses wide K ranges [-200,200] → [-5.3,5.3]
             max_sparse_tokens: max tokens to select for sparse attention
         """
         assert head_dim % Q4_0_BLOCK_SIZE == 0, (
@@ -54,6 +58,7 @@ class DeltaKVCompressor:
         self.stride = reference_stride
         self.num_layers = num_layers
         self.normalized = normalized
+        self.k_transform = k_transform
         self.max_sparse = max_sparse_tokens
 
         # Per-layer state
@@ -100,6 +105,13 @@ class DeltaKVCompressor:
 
         kf_k, kf_v = kf
 
+        # Apply K range compression transform if enabled
+        K_orig = K
+        kf_k_orig = kf_k
+        if self.k_transform == 'log':
+            K = apply_log_transform(K)
+            kf_k = apply_log_transform(kf_k)
+
         if self.normalized:
             q_k, d_k, sk = delta_encode_q4_0_normalized(K, kf_k)
             q_v, d_v, sv = delta_encode_q4_0_normalized(V, kf_v)
@@ -121,13 +133,26 @@ class DeltaKVCompressor:
         """Decompress a single token's K, V from packed format."""
         q_k, d_k, q_v, d_v = packed
         kf = self._keyframes[layer_idx]
+        kf_k, kf_v = kf
+        
+        # Apply transform to keyframe K if enabled
+        if self.k_transform == 'log':
+            kf_k_for_decode = apply_log_transform(kf_k)
+        else:
+            kf_k_for_decode = kf_k
+        
         if self.normalized and self._scales[layer_idx]:
             sk, sv = self._scales[layer_idx].pop(0)
-            K = delta_decode_q4_0_normalized(kf[0], q_k, d_k, sk)
-            V = delta_decode_q4_0_normalized(kf[1], q_v, d_v, sv)
+            K = delta_decode_q4_0_normalized(kf_k_for_decode, q_k, d_k, sk)
+            V = delta_decode_q4_0_normalized(kf_v, q_v, d_v, sv)
         else:
-            K = delta_decode_q4_0(kf[0], q_k, d_k)
-            V = delta_decode_q4_0(kf[1], q_v, d_v)
+            K = delta_decode_q4_0(kf_k_for_decode, q_k, d_k)
+            V = delta_decode_q4_0(kf_v, q_v, d_v)
+        
+        # Apply inverse transform to K if enabled
+        if self.k_transform == 'log':
+            K = apply_log_inverse(K)
+        
         return K, V
 
     def memory_report(self) -> dict:

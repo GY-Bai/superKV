@@ -18,6 +18,7 @@ from superkv.algorithms.turboquant.core import (
     turboquant_quantize,
     turboquant_dequantize,
 )
+from superkv.algorithms.transforms import apply_log_transform, apply_log_inverse
 
 
 @register_algorithm
@@ -40,6 +41,7 @@ class TurboQuantCompressor:
     def __init__(self, num_heads: int, head_dim: int,
                  bits_k: int = 3, bits_v: int = 2,
                  num_layers: int = 1,
+                 k_transform: str | None = 'log',
                  device: str = "cpu"):
         """
         Args:
@@ -48,6 +50,7 @@ class TurboQuantCompressor:
             bits_k:    bit width for keys (default: 3)
             bits_v:    bit width for values (default: 2)
             num_layers: number of transformer layers
+            k_transform: pre-processing for K ('log', None)
             device:    torch device for rotation matrices
         """
         assert 2 <= bits_k <= 4, f"bits_k={bits_k} must be 2-4"
@@ -59,6 +62,7 @@ class TurboQuantCompressor:
         self.bits_k = bits_k
         self.bits_v = bits_v
         self.num_layers = num_layers
+        self.k_transform = k_transform
         self.device = torch.device(device)
 
         # Per-layer rotation matrices (generated once, small memory)
@@ -110,7 +114,9 @@ class TurboQuantCompressor:
             Pi_v = Pi_v.to(V.device)
             self._Pi_v[layer_idx] = Pi_v
 
-        idx_k, norm_k = turboquant_quantize(K.float(), Pi_k, self.bits_k)
+        idx_k, norm_k = turboquant_quantize(
+            apply_log_transform(K.float()) if self.k_transform == 'log' else K.float(),
+            Pi_k, self.bits_k)
         idx_v, norm_v = turboquant_quantize(V.float(), Pi_v, self.bits_v)
 
         # Estimate compressed size
@@ -137,6 +143,11 @@ class TurboQuantCompressor:
         orig_shape = (self.num_heads, self.head_dim)
         K = turboquant_dequantize(idx_k, norm_k, Pi_k, self.bits_k, orig_shape)
         V = turboquant_dequantize(idx_v, norm_v, Pi_v, self.bits_v, orig_shape)
+        
+        # Apply inverse transform to K if enabled
+        if self.k_transform == 'log':
+            K = apply_log_inverse(K)
+        
         return K, V
 
     def memory_report(self) -> dict:
