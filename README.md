@@ -14,6 +14,18 @@ Pluggable vLLM V1 integration.
 | **RocketKV** | Two-stage hybrid eviction | 📋 planned |
 | **KV-Compress** | Paged variable-rate compression | 📋 planned |
 
+## vLLM Plugin (Gate 8)
+
+```python
+from superkv.vllm_plugin import VLLMModelHook
+
+hook = VLLMModelHook(algorithm="deltakv", reference_stride=8)
+hook.install(model)  # hooks attention layers for KV compression
+
+# Model now compresses KV cache via superKV
+print(hook.report())  # {"compression_ratio": 4.2, ...}
+```
+
 ## Quick Start
 
 ```python
