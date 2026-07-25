@@ -1,35 +1,20 @@
-"""TileLang kernel module — Q4_0 quantize and sparse attention."""
+"""TileLang-accelerated kernels for KV compression.
 
-from superkv.engine.platform import get_tilelang_target
+Lazy compiled via @tilelang.jit. Falls back to PyTorch on error.
+"""
 
-_TARGET = get_tilelang_target()
+from superkv.kernels.tilelang.q4_0_kernel import (
+    q4_0_quantize,
+    q4_0_dequantize,
+    _check_tilelang,
+)
+from superkv.kernels.tilelang.q4_0_kernel import (
+    _pytorch_fallback_quantize,
+    _pytorch_fallback_dequantize,
+)
 
-
-def get_q4_0_quantize_kernel():
-    """Lazily compile a tilelang Q4_0 quantize kernel for the current platform.
-
-    Returns a callable (tensor) -> (q_packed, d).
-    Falls back to superkv.algorithms.deltakv.core.quantize_q4_0 on error.
-    """
-    try:
-        import tilelang
-        # TOOD: implement tilelang Q4_0 kernel
-        raise NotImplementedError("tilelang Q4_0 kernel coming in v0.2")
-    except Exception:
-        from superkv.algorithms.deltakv.core import quantize_q4_0
-        return quantize_q4_0
-
-
-def get_sparse_attention_kernel():
-    """Lazily compile a tilelang sparse attention kernel.
-
-    Returns a callable (Q, K_sparse, V_sparse) -> output.
-    Falls back to PyTorch einsum on error.
-    """
-    try:
-        import tilelang
-        # TOOD: implement tilelang sparse attention kernel
-        raise NotImplementedError("tilelang attention kernel coming in v0.2")
-    except Exception:
-        from superkv.algorithms.deltakv.core import sparse_attention
-        return sparse_attention
+__all__ = [
+    "q4_0_quantize",
+    "q4_0_dequantize",
+    "_check_tilelang",
+]

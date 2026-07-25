@@ -18,6 +18,8 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.uv]
-dev-dependencies = [
+
+[dependency-groups]
+dev = [
     "pytest>=8.0",
 ]
