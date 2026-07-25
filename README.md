@@ -9,13 +9,13 @@ Pluggable vLLM V1 integration.
 
 | Algorithm | Method | Status |
 |-----------|--------|--------|
-| **DeltaKV** | Residual encoding + INT8 delta (K+V), q4_0 (legacy) | ✅ v0.1 |
-| **TurboQuant** | Random rotation + Lloyd-Max optimal quantization (K3/V2) | ✅ v0.1 |
+| **DeltaKV** | INT8 delta (K+V), batch, max_tokens, NaN guards | ✅ V4 |
+| **TurboQuant** | Rotation + Lloyd-Max, hybrid INT8 on wide K ranges | ✅ V2 |
 | **Eviction** | Uniform / Similarity / Keyframe token pruning | ✅ v0.1 |
 | **RocketKV** | Two-stage hybrid eviction | 📋 planned |
 | **KV-Compress** | Paged variable-rate compression | 📋 planned |
 
-> 82 tests passing on M2 (CPU) + RTX 3090 (GPU)
+> 89 tests passing — M2 (CPU) + RTX 3090 (GPU)
 
 ## vLLM Plugin (Gate 8)
 
@@ -93,7 +93,7 @@ superkv/
 | Platform | tilelang | PyTorch fallback |
 |----------|----------|-----------------|
 | NVIDIA CUDA | ✅ cuda | ✅ |
-| Apple Metal | 🔜 pending PR#2767 | ✅ |
+| Apple Metal | 🔜 pending PR#2770 | ✅ |
 | Ascend NPU | 🔜 via tilelang | ✅ |
 | x86/ARM CPU | ✅ c | ✅ |
 
@@ -112,15 +112,15 @@ This led to DeltaKV V3 using INT8 delta for both K and V across all layers.
 
 | Model | Type | Attention | VRAM | DeltaKV V3 | K Range |
 |-------|------|-----------|------|------------|---------|
-| **Qwen3-8B** | Dense 8B | traditional ✅ | 16.4GB | 2.6x, MSE<0.006 | [-204, 218] |
+| **Qwen3-8B** | Dense 8B | traditional ✅ | 16.4GB | 4.5x, MSE<0.006 | [-204, 218] |
 | **OLMoE-1B-7B** | MoE 7B | traditional ✅ | 13.8GB | 2.7x, MSE<0.001 | [-17, 19] |
 
 ### Algorithm Comparison (Qwen3-8B, Layer 0)
 
 | Algorithm | Compression | K MSE | V MSE | Notes |
 |-----------|------------|-------|-------|-------|
-| **DeltaKV V3** (INT8 delta) | 2.6x | 0.005 | 0.000 | Best accuracy on wide K ranges |
-| **TurboQuant** (K3V2) | 9.8x | 11.0 | 0.000 | K explodes on [-204,218]; OK on smaller ranges |
+| **DeltaKV V3** (INT8 delta) | 4.5x | 0.005 | 0.000 | Best accuracy on wide K ranges |
+| **TurboQuant** (hybrid INT8) | 6.1x | 0.095 | 0.000 | Auto-switches to INT8 when K too wide |
 
 ### tilelang CUDA Kernel Performance
 
