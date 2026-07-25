@@ -2,13 +2,13 @@
 
 Strategy: Hook into the attention layer output BEFORE vLLM's KV cache
 stores the K,V tensors. Compression happens at the model level, not in
-the attention backend. This means:
-  - No changes to vLLM's paged attention / block pool
-  - Works with any attention backend (Flash, Triton, etc.)
-  - K,V in cache are always FP16 (compressor runs per-layer separately)
+the attention backend.
 
-The compressor maintains its own compressed cache; vLLM's cache holds
-standard FP16 K,V (potentially a subset via eviction).
+Attention type detection:
+  Traditional (K,V):   Hook and compress K,V
+  Linear / DeltaNet:   Skip — no K,V to compress (state is constant-size)
+  MLA (DeepSeek):      Skip — K,V already compressed in latent space
+  Mamba / SSM:         Skip — state space, no K,V
 
 For full integration (compressed cache in vLLM blocks), see
 `superkv/vllm_plugin/backend.py` (coming in v0.2).
@@ -62,14 +62,29 @@ class VLLMModelHook:
     def install(self, model, model_config=None):
         """Install hooks on a vLLM model.
 
-        Args:
-            model: a vLLM V1 model or HuggingFace model.
-            model_config: optional VllmConfig or HF config for head dims.
+        Returns a dict with installation status:
+          - 'compatible': bool — whether model has compressible KV cache
+          - 'attention_type': str — 'traditional', 'linear', 'mla', etc.
+          - 'reason': str — human-readable explanation
         """
         from superkv.engine.registry import create_compressor
 
         if model_config is None:
             model_config = getattr(model, 'config', None)
+
+        # Detect attention type first
+        attn_type, attn_reason = detect_attention_type(model, model_config)
+
+        if attn_type != 'traditional':
+            logger.info(
+                "superKV skipped: %s (%s). No K,V to compress.",
+                attn_type, attn_reason,
+            )
+            return {
+                'compatible': False,
+                'attention_type': attn_type,
+                'reason': attn_reason,
+            }
 
         # Extract model dimensions
         n_kv = _get_kv_heads(model_config)
@@ -97,7 +112,11 @@ class VLLMModelHook:
             self._hook_layer(layer, layer_idx)
 
         self._installed = True
-        return self
+        return {
+            'compatible': True,
+            'attention_type': 'traditional',
+            'reason': f'{self.algorithm} compressor installed on {len(layers)} layers',
+        }
 
     def _hook_layer(self, layer, layer_idx: int):
         """Wrap one attention layer to capture K,V."""
@@ -207,6 +226,95 @@ def _get_self_attn(layer):
         if attn is not None:
             return attn
     return None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Attention type detection
+# ═══════════════════════════════════════════════════════════════════════
+
+def detect_attention_type(model, config=None) -> tuple[str, str]:
+    """Detect what kind of attention mechanism a model uses.
+
+    Returns:
+        (type, reason) where type is one of:
+          'traditional' — standard K,V attention, can compress
+          'linear'      — linear attention / Gated DeltaNet, no K,V
+          'mla'         — Multi-head Latent Attention, K,V in latent space
+          'mamba'       — state space model, no attention
+          'unknown'     — couldn't determine
+
+    Detection methods:
+      1. Check config.architectures / model_type
+      2. Check if k_proj/v_proj exist in attention layers
+      3. Check layer class names for linear/ssm patterns
+    """
+    if config is None:
+        config = getattr(model, 'config', None)
+
+    # ── Method 1: config clues ──
+    arch = _get_arch_name(config)
+    model_type = getattr(config, 'model_type', '').lower() if config else ''
+
+    # Known linear attention models
+    linear_patterns = [
+        'gated_deltanet', 'deltanet', 'linear_attention',
+        'gated_linear', 'mamba2', 'hawk', 'rwkv',
+    ]
+    for pat in linear_patterns:
+        if pat in arch.lower() or pat in model_type:
+            return ('linear', f'config: {arch}')
+
+    # Known MLA models
+    if 'deepseek' in arch.lower() or 'mla' in arch.lower():
+        return ('mla', f'config: {arch}')
+
+    # Known Mamba/SSM models
+    if 'mamba' in arch.lower() or 'ssm' in arch.lower():
+        return ('mamba', f'config: {arch}')
+
+    # ── Method 2: inspect attention module ──
+    layers = _find_layers(model)
+    if layers:
+        attn = _get_self_attn(layers[0])
+        if attn is not None:
+            # Check for K,V projection layers
+            has_k = hasattr(attn, 'k_proj')
+            has_v = hasattr(attn, 'v_proj')
+            has_qkv = hasattr(attn, 'qkv_proj') or hasattr(attn, 'q_proj')
+
+            if not has_k and not has_v:
+                # No K,V projections — likely linear or something else
+                cls_name = attn.__class__.__name__.lower()
+                if any(p in cls_name for p in ['linear', 'delta', 'gated']):
+                    return ('linear', f'layer: {attn.__class__.__name__}')
+                if 'mla' in cls_name:
+                    return ('mla', f'layer: {attn.__class__.__name__}')
+                if 'mamba' in cls_name or 'ssm' in cls_name:
+                    return ('mamba', f'layer: {attn.__class__.__name__}')
+                return ('unknown', 'no k_proj/v_proj found')
+
+            # Has K,V — check for Qwen3.5 linear attention variant
+            cls_name = attn.__class__.__name__
+            if 'LinearAttention' in cls_name or 'DeltaNet' in cls_name:
+                return ('linear', f'layer: {cls_name}')
+
+            return ('traditional', 'has k_proj/v_proj')
+
+    # ── Method 3: model architecture list ──
+    if arch and ('ForCausalLM' in arch or 'ForConditionalGeneration' in arch):
+        return ('traditional', f'inferred from {arch}')
+
+    return ('unknown', 'could not inspect model layers')
+
+
+def _get_arch_name(config) -> str:
+    """Get architecture name from config."""
+    if config is None:
+        return ''
+    archs = getattr(config, 'architectures', None)
+    if archs and isinstance(archs, list) and len(archs) > 0:
+        return archs[0]
+    return getattr(config, 'model_type', '')
 
 
 # ═══════════════════════════════════════════════════════════════════════

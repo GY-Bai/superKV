@@ -165,3 +165,118 @@ class TestLayerFinding:
             pass
 
         assert _get_self_attn(FakeLayer()) is None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Attention type detection
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestAttentionDetection:
+    def test_traditional_from_kv_proj(self):
+        from superkv.vllm_plugin.hook import detect_attention_type
+
+        class FakeConfig:
+            model_type = 'llama'
+
+        class FakeAttention:
+            k_proj = True
+            v_proj = True
+            __class__ = type('LlamaAttention', (), {'__name__': 'LlamaAttention'})
+
+        class FakeLayer:
+            self_attn = FakeAttention()
+
+        class FakeModel:
+            model = types.SimpleNamespace(layers=[FakeLayer()])
+            config = FakeConfig()
+
+        attn_type, reason = detect_attention_type(FakeModel(), FakeConfig())
+        assert attn_type == 'traditional', f'got {attn_type}: {reason}'
+
+    def test_linear_from_class_name(self):
+        from superkv.vllm_plugin.hook import detect_attention_type
+
+        class FakeConfig:
+            model_type = 'qwen3'
+
+        class FakeAttention:
+            __class__ = type('LinearAttentionLayer', (), {'__name__': 'LinearAttentionLayer'})
+            # No k_proj, no v_proj
+
+        class FakeLayer:
+            self_attn = FakeAttention()
+
+        class FakeModel:
+            model = types.SimpleNamespace(layers=[FakeLayer()])
+            config = FakeConfig()
+
+        attn_type, reason = detect_attention_type(FakeModel(), FakeConfig())
+        assert attn_type == 'linear', f'got {attn_type}: {reason}'
+
+    def test_linear_from_config(self):
+        from superkv.vllm_plugin.hook import detect_attention_type
+
+        class FakeConfig:
+            model_type = 'gated_deltanet'
+            architectures = ['GatedDeltaNetForCausalLM']
+
+        class FakeModel:
+            config = FakeConfig()
+            # no layers needed — detected from config
+
+        attn_type, reason = detect_attention_type(FakeModel(), FakeConfig())
+        assert attn_type == 'linear', f'got {attn_type}: {reason}'
+
+    def test_mamba_from_config(self):
+        from superkv.vllm_plugin.hook import detect_attention_type
+
+        class FakeConfig:
+            model_type = 'mamba'
+
+        class FakeModel:
+            config = FakeConfig()
+
+        attn_type, reason = detect_attention_type(FakeModel(), FakeConfig())
+        assert attn_type == 'mamba', f'got {attn_type}: {reason}'
+
+    def test_hook_skips_linear_model(self):
+        """VLLMModelHook.install should return incompatible for linear models."""
+        from superkv.vllm_plugin.hook import VLLMModelHook
+
+        class FakeConfig:
+            model_type = 'gated_deltanet'
+            architectures = ['GatedDeltaNetForCausalLM']
+
+        class FakeModel:
+            config = FakeConfig()
+
+        hook = VLLMModelHook(algorithm="deltakv")
+        result = hook.install(FakeModel())
+        assert result['compatible'] is False
+        assert result['attention_type'] == 'linear'
+
+    def test_hook_installs_on_traditional(self):
+        from superkv.vllm_plugin.hook import VLLMModelHook
+
+        class FakeConfig:
+            model_type = 'llama'
+            num_key_value_heads = 4
+            head_dim = 64
+            num_hidden_layers = 1
+
+        class FakeAttention:
+            k_proj = True
+            v_proj = True
+            __class__ = type('LlamaAttention', (), {'__name__': 'LlamaAttention'})
+
+        class FakeLayer:
+            self_attn = FakeAttention()
+
+        class FakeModel:
+            model = types.SimpleNamespace(layers=[FakeLayer()])
+            config = FakeConfig()
+
+        hook = VLLMModelHook(algorithm="deltakv")
+        result = hook.install(FakeModel())
+        assert result['compatible'] is True
+        assert hook._installed
