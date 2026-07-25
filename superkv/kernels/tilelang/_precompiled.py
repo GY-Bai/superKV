@@ -1,17 +1,30 @@
 """Pre-compiled kernel for the common test shape (4 heads, 32 dim, 8 tokens).
 
-This avoids JIT compilation overhead on first call for the most common
-small test configuration.  Compiled eagerly at import time.
+Compiles once at import time for the detected platform.
 """
 
 import tilelang.language as T
 
 from superkv.kernels.tilelang.q4_0_kernel import _check_tilelang
+from superkv.engine.platform import get_tilelang_target
 
 
-if _check_tilelang():
+_KERNEL = None
+
+
+def get_precompiled_attention():
+    """Return precompiled kernel for current platform (lazy, cached)."""
+    global _KERNEL
+    if _KERNEL is not None:
+        return _KERNEL
+    if not _check_tilelang():
+        _KERNEL = None
+        return None
+
+    target = get_tilelang_target()
+
     @T.prim_func
-    def _attention_scores_static(
+    def _attn_static(
         Q: T.Tensor((4, 32), "float32"),
         K: T.Tensor((8, 4, 32), "float32"),
         scores: T.Tensor((4, 8), "float32"),
@@ -24,7 +37,10 @@ if _check_tilelang():
                 scores[h, i] = dot
 
     import tilelang
-    _precompiled_attention_scores_4x32x8 = tilelang.compile(
-        _attention_scores_static, target="c")
-else:
-    _precompiled_attention_scores_4x32x8 = None
+    _KERNEL = tilelang.compile(_attn_static, target=target)
+    return _KERNEL
+
+
+def has_precompiled() -> bool:
+    """Check if a precompiled kernel is available on this platform."""
+    return _check_tilelang()

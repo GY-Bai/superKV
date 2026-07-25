@@ -55,13 +55,18 @@ class TestSparseAttentionCompile:
 
     @requires_tilelang
     def test_precompiled(self):
-        """Pre-compiled (4,32,8) kernel should work."""
-        from superkv.kernels.tilelang._precompiled import \
-            _precompiled_attention_scores_4x32x8
+        """Pre-compiled kernel should work on current platform."""
+        from superkv.kernels.tilelang._precompiled import (
+            get_precompiled_attention, has_precompiled)
+        if not has_precompiled():
+            pytest.skip("tilelang not available")
+        kernel = get_precompiled_attention()
+        if kernel is None:
+            pytest.skip("precompiled kernel not available on this platform")
         Q = torch.randn(4, 32)
         K = torch.randn(8, 4, 32)
         scores = torch.zeros(4, 8, dtype=torch.float32)
-        _precompiled_attention_scores_4x32x8(Q, K, scores)
+        kernel(Q, K, scores)
         assert scores.shape == (4, 8)
 
     @requires_tilelang
