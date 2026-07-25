@@ -96,8 +96,7 @@ class VLLMModelHook:
             self.algorithm, n_kv, hd, n_l,
         )
 
-        kwargs = dict(num_heads=n_kv, head_dim=hd, num_layers=n_l,
-                      device='cuda')
+        kwargs = dict(num_heads=n_kv, head_dim=hd, num_layers=n_l)
         if self.algorithm == "deltakv":
             kwargs['reference_stride'] = self.reference_stride
         elif self.algorithm == "turboquant":

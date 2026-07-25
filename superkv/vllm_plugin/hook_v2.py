@@ -49,7 +49,7 @@ class VLLMModelHook:
 
         dims = extract_model_dims(model_config)
         kwargs = dict(num_heads=dims['n_kv'], head_dim=dims['hd'],
-                      num_layers=dims['n_layers'], device='cuda')
+                      num_layers=dims['n_layers'])
         if self.algorithm == "deltakv":
             kwargs['reference_stride'] = self.reference_stride
 
