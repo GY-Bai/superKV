@@ -91,7 +91,7 @@ def _ensure_algorithms_loaded():
     if _algorithms_loaded:
         return
     import importlib
-    for mod_name in ["superkv.algorithms.deltakv", "superkv.algorithms.turboquant"]:
+    for mod_name in ["superkv.algorithms.deltakv", "superkv.algorithms.turboquant", "superkv.algorithms.adaptive"]:
         try:
             importlib.import_module(mod_name)
         except ImportError:
