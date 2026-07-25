@@ -172,3 +172,33 @@ def sparse_attention(Q: torch.Tensor, K_sparse: torch.Tensor,
     scores = torch.einsum('hd,khd->hk', Q, K_sparse) * scale
     weights = torch.softmax(scores, dim=-1)
     return torch.einsum('hk,khd->hd', weights, V_sparse)
+
+
+# ── INT8 delta encoding (for K, which has large range) ──────────────
+
+def delta_encode_int8(curr: torch.Tensor, keyframe: torch.Tensor
+                      ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-head INT8 delta encoding.
+
+    K residuals have smaller range than K itself (delta_K max_abs ~50
+    vs K max_abs ~200), making INT8 accurate enough for reconstruction.
+
+    Args:
+        curr:     current K, shape (n_heads, head_dim)
+        keyframe: reference K, same shape
+
+    Returns:
+        delta_int8: (n_heads, head_dim) int8
+        scale:      (n_heads,) float32 — per-head scale for decoding
+    """
+    delta = curr - keyframe
+    scale = delta.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8) / 127.0
+    delta_int8 = torch.clamp(torch.round(delta / scale), -128, 127).to(torch.int8)
+    return delta_int8, scale.squeeze(-1)
+
+
+def delta_decode_int8(keyframe: torch.Tensor,
+                      delta_int8: torch.Tensor,
+                      scale: torch.Tensor) -> torch.Tensor:
+    """Decode INT8 delta: keyframe + delta_int8 * scale."""
+    return keyframe + delta_int8.float() * scale.unsqueeze(-1)

@@ -1,7 +1,13 @@
 """DeltaKV compressor — implements the KVCompressor protocol.
 
-Manages keyframe storage, residual encoding, Q4_0 quantization,
-and sparse token selection for each transformer layer.
+V3: Asymmetric K/V encoding.
+  K: INT8 delta (residuals are small, INT8 is accurate)
+  V: Q4_0 delta (values are small, Q4_0 works well)
+
+Keyframe tokens are stored at full precision (every `reference_stride` tokens).
+Non-keyframe tokens store:
+  delta_K = K_curr - K_keyframe  → INT8 with per-head scale
+  delta_V = V_curr - V_keyframe  → Q4_0 with per-block scale
 """
 
 from __future__ import annotations
@@ -13,58 +19,39 @@ from superkv.engine.registry import KVCompressor, register_algorithm
 from superkv.algorithms.deltakv.core import (
     delta_encode_q4_0,
     delta_decode_q4_0,
-    delta_encode_q4_0_normalized,
-    delta_decode_q4_0_normalized,
+    delta_encode_int8,
+    delta_decode_int8,
     is_keyframe,
     Q4_0_BLOCK_SIZE,
 )
-from superkv.algorithms.transforms import apply_log_transform, apply_log_inverse
 
 
 @register_algorithm
 class DeltaKVCompressor:
-    """DeltaKV KV cache compressor.
-
-    For each layer, maintains:
-      - last_keyframe: K, V tensors of the most recent keyframe token
-      - compressed: list of Q4_0-packed residuals since last keyframe
-    """
+    """DeltaKV KV cache compressor (V3 asymmetric)."""
 
     name = "deltakv"
-    version = "2.0"
+    version = "3.0"
 
     def __init__(self, num_heads: int, head_dim: int,
                  reference_stride: int = 8,
                  num_layers: int = 1,
                  normalized: bool = True,
-                 k_transform: str | None = 'log',
-                 max_sparse_tokens: int = 256):
-        """
-        Args:
-            num_heads: number of KV attention heads
-            head_dim: dimension per head (must be divisible by 32)
-            reference_stride: keyframe interval (stride=1 = no compression)
-            num_layers: number of transformer layers
-            normalized: use per-head normalized Q4_0 (recommended for real models)
-            k_transform: pre-processing for K ('log', None).
-                         'log' compresses wide K ranges [-200,200] → [-5.3,5.3]
-            max_sparse_tokens: max tokens to select for sparse attention
-        """
-        assert head_dim % Q4_0_BLOCK_SIZE == 0, (
-            f"head_dim {head_dim} must be divisible by {Q4_0_BLOCK_SIZE}")
+                 max_sparse_tokens: int = 256,
+                 **kwargs):  # accept legacy params silently
+        assert head_dim % Q4_0_BLOCK_SIZE == 0
 
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.stride = reference_stride
         self.num_layers = num_layers
         self.normalized = normalized
-        self.k_transform = k_transform
         self.max_sparse = max_sparse_tokens
 
-        # Per-layer state
         self._keyframes: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
-        self._compressed: dict[int, list[tuple]] = defaultdict(list)
-        self._scales: dict[int, list[torch.Tensor]] = defaultdict(list)
+        self._compressed: dict[int, list[tuple]] = {}
+        # Per-token scales: (dk_scale, sv or None)
+        self._scales: dict[int, list[tuple]] = {}
         self._total_original = 0
         self._total_compressed = 0
 
@@ -72,91 +59,46 @@ class DeltaKVCompressor:
 
     def compress(self, K: torch.Tensor, V: torch.Tensor,
                  layer_idx: int = 0,
-                 token_id: int | None = None) -> tuple:
-        """Compress a single token's K, V.
-
-        If token is a keyframe, store it as reference.
-        Otherwise, encode residual from last keyframe.
-
-        Args:
-            K: (num_heads, head_dim) float32
-            V: (num_heads, head_dim) float32
-            layer_idx: layer index
-            token_id: position in sequence (used for keyframe check)
-
-        Returns:
-            (q_k, d_k, q_v, d_v, head_scale_k, head_scale_v) or None if keyframe
-        """
+                 token_id: int | None = None) -> tuple | None:
         elem_bytes = K.element_size()
         self._total_original += K.numel() * elem_bytes + V.numel() * elem_bytes
 
+        # Keyframe: store full precision
         if token_id is not None and is_keyframe(token_id, self.stride):
-            # Keyframe: store full-precision
             self._keyframes[layer_idx] = (K.clone(), V.clone())
             self._total_compressed += K.numel() * elem_bytes + V.numel() * elem_bytes
-            return None  # nothing compressed
+            return None
 
         kf = self._keyframes.get(layer_idx)
         if kf is None:
-            # No keyframe yet — treat this token as first keyframe
             self._keyframes[layer_idx] = (K.clone(), V.clone())
             self._total_compressed += K.numel() * elem_bytes + V.numel() * elem_bytes
             return None
 
         kf_k, kf_v = kf
 
-        # Apply K range compression transform if enabled
-        K_orig = K
-        kf_k_orig = kf_k
-        if self.k_transform == 'log':
-            K = apply_log_transform(K)
-            kf_k = apply_log_transform(kf_k)
+        # K: INT8 delta (residuals are ~±50, INT8 handles this well)
+        dk_int8, dk_scale = delta_encode_int8(K, kf_k)
+        self._total_compressed += dk_int8.nbytes + dk_scale.nbytes
 
-        if self.normalized:
-            q_k, d_k, sk = delta_encode_q4_0_normalized(K, kf_k)
-            q_v, d_v, sv = delta_encode_q4_0_normalized(V, kf_v)
-            self._scales[layer_idx].append((sk, sv))
-            self._total_compressed += q_k.nbytes + d_k.nbytes + sk.nbytes
-            self._total_compressed += q_v.nbytes + d_v.nbytes + sv.nbytes
-        else:
-            q_k, d_k = delta_encode_q4_0(K, kf_k)
-            q_v, d_v = delta_encode_q4_0(V, kf_v)
-            self._total_compressed += q_k.nbytes + d_k.nbytes
-            self._total_compressed += q_v.nbytes + d_v.nbytes
+        # V: Q4_0 delta (V values are small, Q4_0 is accurate)
+        q_v, d_v = delta_encode_q4_0(V, kf_v)
+        self._total_compressed += q_v.nbytes + d_v.nbytes
 
-        result = (q_k, d_k, q_v, d_v)
-        self._compressed[layer_idx].append(result)
+        result = (dk_int8, q_v, d_v, dk_scale)
+        self._compressed.setdefault(layer_idx, []).append(result)
         return result
 
     def decompress(self, packed, layer_idx: int = 0
                    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Decompress a single token's K, V from packed format."""
-        q_k, d_k, q_v, d_v = packed
-        kf = self._keyframes[layer_idx]
-        kf_k, kf_v = kf
-        
-        # Apply transform to keyframe K if enabled
-        if self.k_transform == 'log':
-            kf_k_for_decode = apply_log_transform(kf_k)
-        else:
-            kf_k_for_decode = kf_k
-        
-        if self.normalized and self._scales[layer_idx]:
-            sk, sv = self._scales[layer_idx].pop(0)
-            K = delta_decode_q4_0_normalized(kf_k_for_decode, q_k, d_k, sk)
-            V = delta_decode_q4_0_normalized(kf_v, q_v, d_v, sv)
-        else:
-            K = delta_decode_q4_0(kf_k_for_decode, q_k, d_k)
-            V = delta_decode_q4_0(kf_v, q_v, d_v)
-        
-        # Apply inverse transform to K if enabled
-        if self.k_transform == 'log':
-            K = apply_log_inverse(K)
-        
+        dk_int8, q_v, d_v, dk_scale = packed
+        kf_k, kf_v = self._keyframes[layer_idx]
+
+        K = delta_decode_int8(kf_k, dk_int8, dk_scale)
+        V = delta_decode_q4_0(kf_v, q_v, d_v)
         return K, V
 
     def memory_report(self) -> dict:
-        """Return compression statistics."""
         ratio = (self._total_original / self._total_compressed
                  if self._total_compressed > 0 else 1.0)
         return {
@@ -169,7 +111,6 @@ class DeltaKVCompressor:
         }
 
     def reset(self):
-        """Clear all stored KV cache."""
         self._keyframes.clear()
         self._compressed.clear()
         self._scales.clear()

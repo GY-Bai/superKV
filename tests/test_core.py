@@ -166,7 +166,7 @@ class TestDeltaKVCompressor:
         from superkv.algorithms.deltakv import DeltaKVCompressor
         c = DeltaKVCompressor(num_heads=4, head_dim=64, num_layers=2)
         assert c.name == "deltakv"
-        assert c.version == "2.0"
+        assert c.version == "3.0"
 
     def test_compress_keyframe(self):
         from superkv.algorithms.deltakv import DeltaKVCompressor
