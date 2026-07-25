@@ -166,7 +166,7 @@ class TestDeltaKVCompressor:
         from superkv.algorithms.deltakv import DeltaKVCompressor
         c = DeltaKVCompressor(num_heads=4, head_dim=64, num_layers=2)
         assert c.name == "deltakv"
-        assert c.version == "3.0"
+        assert c.version == "4.0"
 
     def test_compress_keyframe(self):
         from superkv.algorithms.deltakv import DeltaKVCompressor
@@ -240,3 +240,42 @@ class TestDeltaKVCompressor:
         # Normalized should keep MSE reasonable even with large K range
         assert mse_k < 50, f"K MSE {mse_k:.2f} too high (normalized failed)"
         assert mse_v < 0.1, f"V MSE {mse_v:.2f} too high"
+
+
+class TestBatchSupport:
+    def test_batch_compress(self):
+        from superkv.algorithms.deltakv import DeltaKVCompressor
+        c = DeltaKVCompressor(num_heads=4, head_dim=64, reference_stride=1)
+        # stride=1 means every token is keyframe
+        K = torch.randn(3, 4, 64)
+        V = torch.randn(3, 4, 64)
+        results = c.compress(K, V, layer_idx=0, token_id=0)
+        # All should be keyframes (stride=1)
+        assert results is None
+
+    def test_batch_mixed_tokens(self):
+        from superkv.algorithms.deltakv import DeltaKVCompressor
+        c = DeltaKVCompressor(num_heads=4, head_dim=64, reference_stride=4)
+        # Token 0: keyframe (batch=2)
+        c.compress(torch.randn(2, 4, 64), torch.randn(2, 4, 64),
+                   layer_idx=0, token_id=0)
+        # Token 1: non-keyframe
+        results = c.compress(torch.randn(2, 4, 64), torch.randn(2, 4, 64),
+                             layer_idx=0, token_id=1)
+        assert isinstance(results, list)
+        assert len(results) == 2
+
+    def test_max_tokens_eviction(self):
+        from superkv.algorithms.deltakv import DeltaKVCompressor
+        c = DeltaKVCompressor(num_heads=4, head_dim=64,
+                              reference_stride=1, max_tokens=5)
+        for t in range(10):
+            c.compress(torch.randn(4, 64), torch.randn(4, 64),
+                       layer_idx=0, token_id=t)
+        r = c.memory_report()
+        assert r['stored_tokens'] <= 5
+
+    def test_version(self):
+        from superkv.algorithms.deltakv import DeltaKVCompressor
+        c = DeltaKVCompressor(num_heads=4, head_dim=64)
+        assert c.version == "4.0"

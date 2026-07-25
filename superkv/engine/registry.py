@@ -15,20 +15,17 @@ import torch
 class KVCompressor(Protocol):
     """Protocol that all KV compression algorithms must implement."""
 
-    name: str  # unique identifier, e.g. "deltakv", "turboquant"
-    version: str  # semantic version
+    name: str
+    version: str
 
     def compress(self, K: torch.Tensor, V: torch.Tensor,
-                 layer_idx: int = 0) -> tuple:
+                 layer_idx: int = 0,
+                 token_id: int | None = None) -> tuple | None:
         """Compress K, V tensors for one attention layer.
 
-        Args:
-            K: key tensor, shape (num_kv_heads, head_dim) or (tokens, num_kv_heads, head_dim)
-            V: value tensor, same shape as K
-            layer_idx: which transformer layer this KV is from
-
-        Returns:
-            algorithm-specific compressed representation
+        Supports both per-token and batched:
+          Per-token: K shape (n_heads, head_dim)
+          Batched:   K shape (batch, n_heads, head_dim)
         """
         ...
 
